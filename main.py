@@ -21,11 +21,9 @@ CYAN = (70, 240, 240)
 YELLOW = (255, 220, 90)
 PURPLE = (170, 120, 255)
 
-# Helper
 def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
 
-# Player
 @dataclass
 class Player:
     x: float
@@ -69,6 +67,10 @@ class Player:
         self.x = clamp(self.x, 0, WIDTH - self.size)
 
     @property
+    def is_dashing(self) -> bool:
+        return self._dash_left > 0.0
+
+    @property
     def invulnerable(self) -> bool:
         return self._invuln_left > 0.0
 
@@ -82,7 +84,6 @@ class Player:
             return 0.0
         return clamp(self._cooldown_left / max(0.001, self.dash_cooldown), 0.0, 1.0)
 
-# Hazard
 @dataclass
 class Hazard:
     kind: str
@@ -97,7 +98,29 @@ class Hazard:
     def rect(self):
         return pygame.Rect(int(self.x), int(self.y), self.w, self.h)
 
-# Game
+@dataclass
+class Particle:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    life: float
+    max_life: float
+    color: tuple[int, int, int]
+    size: int
+
+    def update(self, dt: float):
+        self.x += self.vx * dt
+        self.y += self.vy * dt
+        self.life -= dt
+
+    def draw(self, surface):
+        alpha = int((self.life / self.max_life) * 255)
+        s = pygame.Surface((self.size, self.size))
+        s.set_alpha(alpha)
+        s.fill(self.color)
+        surface.blit(s, (int(self.x), int(self.y)))
+
 class Game:
     def __init__(self):
         self.font = pygame.font.SysFont("consolas", 18)
@@ -108,6 +131,7 @@ class Game:
         self.rng = random.Random()
         self.player = Player(x=WIDTH/2-14, y=HEIGHT-78)
         self.hazards: list[Hazard] = []
+        self.particles: list[Particle] = []
         self.score = 0.0
         self.best = 0.0
         self.level = 1
@@ -123,7 +147,18 @@ class Game:
     def compute_level(self):
         return 1 + int(self.score // 450)
 
-    # Spawning hazards
+    def create_particles(self, x, y, color, count=10, speed=150.0):
+        for _ in range(count):
+            self.particles.append(Particle(
+                x=x, y=y,
+                vx=random.uniform(-speed, speed),
+                vy=random.uniform(-speed, speed),
+                life=0.4,
+                max_life=0.4,
+                color=color,
+                size=random.randint(3, 6)
+            ))
+
     def spawn_fall(self, diff):
         size = int(clamp(22 + diff*2.0, 22, 52))
         x = self.rng.uniform(0, WIDTH-size)
@@ -152,18 +187,15 @@ class Game:
         diff = self.difficulty()
         self.spawn_timer -= dt
         base_interval = 0.32 / clamp(diff**0.55, 1.0, 3.0)
-        chaos = self.rng.uniform(-0.07,0.07)
         if self.spawn_timer <= 0.0:
-            self.spawn_timer = clamp(base_interval+chaos,0.10,0.40)
+            self.spawn_timer = clamp(base_interval + self.rng.uniform(-0.07,0.07), 0.10, 0.40)
             roll = self.rng.random()
-            if roll < 0.65:
+            if roll < 0.65: self.spawn_fall(diff)
+            elif roll < 0.90: self.spawn_zig(diff)
+            else: 
                 self.spawn_fall(diff)
-            elif roll < 0.90:
-                self.spawn_zig(diff)
-            else:
-                self.spawn_fall(diff)
-                if self.rng.random() < 0.35:
-                    self.spawn_zig(diff)
+                if self.rng.random() < 0.35: self.spawn_zig(diff)
+        
         self.snipe_charge += dt
         snipe_interval = clamp(1.35 / clamp(diff**0.65,1.0,4.0),0.45,1.35)
         if self.snipe_charge >= snipe_interval:
@@ -188,80 +220,97 @@ class Game:
             if p.colliderect(hz.rect()): return True
         return False
 
+    def draw(self):
+        screen.fill(BLACK)
+        
+        # Draw Particles first
+        for p in self.particles:
+            p.draw(screen)
+
+        if self._just_died_flash > 0.0:
+            overlay = pygame.Surface((WIDTH,HEIGHT))
+            overlay.set_alpha(int(120 * (self._just_died_flash/0.18)))
+            overlay.fill((160,30,40))
+            screen.blit(overlay,(0,0))
+
+        for hz in self.hazards:
+            pygame.draw.rect(screen, hz.color, hz.rect(), border_radius=6)
+        
+        p_rect = self.player.rect()
+        p_color = (240,240,240) if self.player.invulnerable else (210,210,210)
+        pygame.draw.rect(screen, p_color, p_rect, border_radius=6)
+        
+        if self.player.invulnerable:
+            pygame.draw.rect(screen, WHITE, p_rect.inflate(10,10), width=2, border_radius=8)
+        
+        self.draw_hud()
+
+        if not self.alive:
+            title = self.big_font.render("GAME OVER", True, WHITE)
+            sub = self.font.render("Press R to restart | Esc to quit", True, WHITE)
+            screen.blit(title,(WIDTH/2 - title.get_width()/2, HEIGHT/2-90))
+            screen.blit(sub,(WIDTH/2 - sub.get_width()/2, HEIGHT/2-25))
+
     def draw_hud(self):
         score_txt = self.font.render(f"SCORE {int(self.score):>6}", True, WHITE)
         lvl_txt = self.font.render(f"LVL {self.level:>2}", True, WHITE)
         screen.blit(score_txt,(12,10))
         screen.blit(lvl_txt,(12,32))
-        # Dash bar
         bar_w, bar_h = 140, 10
         x, y = WIDTH-bar_w-12, 14
         pygame.draw.rect(screen,(40,40,55),(x,y,bar_w,bar_h),border_radius=6)
         fill = int(bar_w*(1.0 - self.player.dash_cooldown_ratio))
         pygame.draw.rect(screen,YELLOW if self.player.dash_ready else (160,140,70),(x,y,fill,bar_h),border_radius=6)
-        dash_txt = self.font.render("DASH", True, WHITE)
-        screen.blit(dash_txt,(x,y+14))
-
-    def draw(self):
-        screen.fill(BLACK)
-        if self._just_died_flash>0.0:
-            t = clamp(self._just_died_flash/0.18,0.0,1.0)
-            overlay = pygame.Surface((WIDTH,HEIGHT))
-            overlay.set_alpha(int(120*t))
-            overlay.fill((160,30,40))
-            screen.blit(overlay,(0,0))
-        for hz in self.hazards:
-            pygame.draw.rect(screen,hz.color,hz.rect(),border_radius=6)
-        p_rect = self.player.rect()
-        p_color = (210,210,210) if not self.player.invulnerable else (240,240,240)
-        pygame.draw.rect(screen,p_color,p_rect,border_radius=6)
-        if self.player.invulnerable:
-            pygame.draw.rect(screen,(255,255,255),p_rect.inflate(10,10),width=2,border_radius=8)
-        self.draw_hud()
-        if not self.alive:
-            title = self.big_font.render("GAME OVER", True, WHITE)
-            sub = self.font.render("Press R to restart | Esc to quit", True, WHITE)
-            tip = self.font.render("Tip: Dash with SPACE. Use it late.", True,(210,210,210))
-            screen.blit(title,(WIDTH/2 - title.get_width()/2, HEIGHT/2-90))
-            screen.blit(sub,(WIDTH/2 - sub.get_width()/2, HEIGHT/2-25))
-            screen.blit(tip,(WIDTH/2 - tip.get_width()/2, HEIGHT/2+5))
 
     def update(self, dt):
+        # Always update particles
+        for p in self.particles:
+            p.update(dt)
+        self.particles = [p for p in self.particles if p.life > 0]
+
         if not self.alive:
-            self._just_died_flash = max(0.0,self._just_died_flash - dt)
+            self._just_died_flash = max(0.0, self._just_died_flash - dt)
             return
+
         keys = pygame.key.get_pressed()
         move_dir = 0.0
-        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
-            move_dir -= 1.0
-        if keys[pygame.K_RIGHT] or keys[pygame.K_d]:
-            move_dir += 1.0
+        if keys[pygame.K_LEFT] or keys[pygame.K_a]: move_dir -= 1.0
+        if keys[pygame.K_RIGHT] or keys[pygame.K_d]: move_dir += 1.0
+        
         if keys[pygame.K_SPACE]:
-            self.player.start_dash(move_dir if move_dir!=0.0 else 0.0)
+            self.player.start_dash(move_dir)
+
+        # Dash trail effect
+        if self.player.is_dashing:
+            self.create_particles(self.player.x + self.player.size/2, 
+                                  self.player.y + self.player.size/2, 
+                                  CYAN, count=2, speed=50)
+
         self.player.update(dt, move_dir)
         self.update_spawns(dt)
         self.update_hazards(dt)
-        if self.check_collisions():
-            self.alive=False
-            self._just_died_flash=0.18
-            self.best=max(self.best,self.score)
-            return
-        self.score += dt*(40.0+12.0*clamp(self.difficulty(),1.0,6.0))
-        self.level = self.compute_level()
-        self.time += dt
 
-# Main loop
+        if self.check_collisions():
+            self.alive = False
+            self._just_died_flash = 0.18
+            self.create_particles(self.player.x + 14, self.player.y + 14, WHITE, count=40, speed=250)
+            self.best = max(self.best, self.score)
+            return
+
+        self.score += dt*(40.0 + 12.0*clamp(self.difficulty(),1.0,6.0))
+        self.level = self.compute_level()
+
 def main():
     game = Game()
     while True:
         dt = clock.tick(FPS)/1000.0
         for event in pygame.event.get():
-            if event.type==pygame.QUIT:
+            if event.type == pygame.QUIT:
                 pygame.quit(); sys.exit()
-            if event.type==pygame.KEYDOWN:
-                if event.key==pygame.K_ESCAPE:
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
                     pygame.quit(); sys.exit()
-                if not game.alive and event.key==pygame.K_r:
+                if not game.alive and event.key == pygame.K_r:
                     game.reset()
         game.update(dt)
         game.draw()

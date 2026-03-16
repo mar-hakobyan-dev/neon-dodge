@@ -10,6 +10,7 @@ pygame.init()
 WIDTH, HEIGHT = 600, 800
 FPS = 60
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
+display_surface = pygame.Surface((WIDTH, HEIGHT)) 
 pygame.display.set_caption("NEON DODGE: Hard Mode")
 clock = pygame.time.Clock()
 
@@ -140,6 +141,7 @@ class Game:
         self.spawn_timer = 0.0
         self.snipe_charge = 0.0
         self._just_died_flash = 0.0
+        self.shake_intensity = 0.0
 
     def difficulty(self):
         return 1.0 + (self.score / 800.0)
@@ -221,28 +223,35 @@ class Game:
         return False
 
     def draw(self):
-        screen.fill(BLACK)
+        display_surface.fill(BLACK)
         
-        # Draw Particles first
         for p in self.particles:
-            p.draw(screen)
+            p.draw(display_surface)
 
+        for hz in self.hazards:
+            pygame.draw.rect(display_surface, hz.color, hz.rect(), border_radius=6)
+        
+        p_rect = self.player.rect()
+        p_color = (240,240,240) if self.player.invulnerable else (210,210,210)
+        pygame.draw.rect(display_surface, p_color, p_rect, border_radius=6)
+        
+        if self.player.invulnerable:
+            pygame.draw.rect(display_surface, WHITE, p_rect.inflate(10,10), width=2, border_radius=8)
+        
         if self._just_died_flash > 0.0:
             overlay = pygame.Surface((WIDTH,HEIGHT))
             overlay.set_alpha(int(120 * (self._just_died_flash/0.18)))
             overlay.fill((160,30,40))
-            screen.blit(overlay,(0,0))
+            display_surface.blit(overlay,(0,0))
 
-        for hz in self.hazards:
-            pygame.draw.rect(screen, hz.color, hz.rect(), border_radius=6)
-        
-        p_rect = self.player.rect()
-        p_color = (240,240,240) if self.player.invulnerable else (210,210,210)
-        pygame.draw.rect(screen, p_color, p_rect, border_radius=6)
-        
-        if self.player.invulnerable:
-            pygame.draw.rect(screen, WHITE, p_rect.inflate(10,10), width=2, border_radius=8)
-        
+        render_offset = (0, 0)
+        if self.shake_intensity > 0:
+            render_offset = (random.uniform(-self.shake_intensity, self.shake_intensity),
+                             random.uniform(-self.shake_intensity, self.shake_intensity))
+
+        screen.fill(BLACK)
+        screen.blit(display_surface, render_offset)
+
         self.draw_hud()
 
         if not self.alive:
@@ -263,7 +272,9 @@ class Game:
         pygame.draw.rect(screen,YELLOW if self.player.dash_ready else (160,140,70),(x,y,fill,bar_h),border_radius=6)
 
     def update(self, dt):
-        # Always update particles
+        if self.shake_intensity > 0:
+            self.shake_intensity = max(0.0, self.shake_intensity - dt * 30.0)
+
         for p in self.particles:
             p.update(dt)
         self.particles = [p for p in self.particles if p.life > 0]
@@ -277,10 +288,11 @@ class Game:
         if keys[pygame.K_LEFT] or keys[pygame.K_a]: move_dir -= 1.0
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]: move_dir += 1.0
         
-        if keys[pygame.K_SPACE]:
+        if keys[pygame.K_SPACE] and move_dir != 0:
             self.player.start_dash(move_dir)
+            if self.player.is_dashing:
+                self.shake_intensity = 4.0
 
-        # Dash trail effect
         if self.player.is_dashing:
             self.create_particles(self.player.x + self.player.size/2, 
                                   self.player.y + self.player.size/2, 
@@ -293,6 +305,7 @@ class Game:
         if self.check_collisions():
             self.alive = False
             self._just_died_flash = 0.18
+            self.shake_intensity = 18.0 
             self.create_particles(self.player.x + 14, self.player.y + 14, WHITE, count=40, speed=250)
             self.best = max(self.best, self.score)
             return

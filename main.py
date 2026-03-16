@@ -1,12 +1,13 @@
 import pygame
 import sys
+import random
 
 pygame.init()
 
 # Window settings
 WIDTH, HEIGHT = 600, 800
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("NEON DODGE: Phase 1")
+pygame.display.set_caption("NEON DODGE: Phase 2")
 clock = pygame.time.Clock()
 FPS = 60
 
@@ -14,6 +15,7 @@ FPS = 60
 BLACK = (10, 10, 14)
 WHITE = (245, 245, 245)
 PLAYER_COLOR = (210, 210, 210)
+HAZARD_COLOR = (240, 60, 90)
 
 # Helper
 def clamp(v, lo, hi):
@@ -48,13 +50,31 @@ class Player:
             self.x += move_dir * self.speed * dt
         self.x = clamp(self.x, 0, WIDTH - self.size)
 
-# Game loop
-player = Player(WIDTH / 2 - 14, HEIGHT - 78)
+# Hazard class
+class Hazard:
+    def __init__(self, x, y, size, vy):
+        self.x = x
+        self.y = y
+        self.size = size
+        self.vy = vy
 
+    def rect(self):
+        return pygame.Rect(int(self.x), int(self.y), self.size, self.size)
+
+# Game setup
+player = Player(WIDTH / 2 - 14, HEIGHT - 78)
+hazards = []
+spawn_timer = 0.0
+score = 0.0
+alive = True
+rng = random.Random()
+
+# Game loop
 running = True
 while running:
     dt = clock.tick(FPS) / 1000.0
 
+    # Event handling
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
@@ -62,7 +82,7 @@ while running:
             if event.key == pygame.K_ESCAPE:
                 running = False
 
-    # Movement input
+    # Input
     keys = pygame.key.get_pressed()
     move_dir = 0
     if keys[pygame.K_LEFT] or keys[pygame.K_a]:
@@ -72,12 +92,51 @@ while running:
     if keys[pygame.K_SPACE]:
         player.start_dash(move_dir if move_dir != 0 else 0)
 
-    # Update
+    # Update player
     player.update(dt, move_dir)
+
+    # Spawn hazards
+    spawn_timer -= dt
+    if spawn_timer <= 0.0:
+        spawn_timer = 0.8  # spawn interval
+        size = rng.randint(20, 40)
+        x = rng.uniform(0, WIDTH - size)
+        y = -size
+        vy = rng.uniform(180, 260)
+        hazards.append(Hazard(x, y, size, vy))
+
+    # Update hazards
+    for hz in hazards:
+        hz.y += hz.vy * dt
+
+    # Collision detection
+    player_rect = player.rect()
+    for hz in hazards:
+        if player_rect.colliderect(hz.rect()):
+            alive = False
+
+    # Remove off-screen hazards
+    hazards = [hz for hz in hazards if hz.y < HEIGHT + 50]
+
+    # Update score
+    if alive:
+        score += dt * 10
 
     # Draw
     screen.fill(BLACK)
+    for hz in hazards:
+        pygame.draw.rect(screen, HAZARD_COLOR, hz.rect(), border_radius=6)
     pygame.draw.rect(screen, PLAYER_COLOR, player.rect(), border_radius=6)
+
+    # Draw score
+    font = pygame.font.SysFont("consolas", 18)
+    score_text = font.render(f"SCORE: {int(score)}", True, WHITE)
+    screen.blit(score_text, (10, 10))
+
+    # Game over text
+    if not alive:
+        game_over_text = font.render("GAME OVER", True, WHITE)
+        screen.blit(game_over_text, (WIDTH / 2 - game_over_text.get_width() / 2, HEIGHT / 2))
 
     pygame.display.flip()
 

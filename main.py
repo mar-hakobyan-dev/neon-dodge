@@ -1,9 +1,13 @@
 import math
 import random
 import sys
+from array import array
+import os
+os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = "hide"
 import pygame
 from dataclasses import dataclass
 
+pygame.mixer.pre_init(frequency=44100, size=-16, channels=1, buffer=512)
 pygame.init()
 
 WIDTH, HEIGHT = 600, 800
@@ -147,9 +151,61 @@ class Particle:
 
 class Game:
     def __init__(self):
+        self.sound_enabled = True
+        try:
+            if not pygame.mixer.get_init():
+                pygame.mixer.init()
+        except pygame.error:
+            self.sound_enabled = False
+
         self.font = pygame.font.SysFont("consolas", 18)
         self.big_font = pygame.font.SysFont("consolas", 46, bold=True)
+
+        self.snd_dash = self._make_tone(freq=880, duration=0.055, volume=0.45)
+        self.snd_powerup = self._make_tone(freq=1320, duration=0.090, volume=0.40, slide_to=1760)
+        self.snd_death = self._make_tone(freq=220, duration=0.220, volume=0.55, slide_to=80)
+        self.snd_restart = self._make_tone(freq=660, duration=0.065, volume=0.35, slide_to=990)
+
         self.reset()
+
+    def _make_tone(self, freq: float, duration: float, volume: float, slide_to: float | None = None):
+        if not self.sound_enabled or not pygame.mixer.get_init():
+            return None
+
+        sample_rate = pygame.mixer.get_init()[0] or 44100
+        n_samples = max(1, int(sample_rate * duration))
+        amp = int(32767 * clamp(volume, 0.0, 1.0))
+        start_f = max(20.0, float(freq))
+        end_f = max(20.0, float(slide_to)) if slide_to is not None else start_f
+
+        buf = array("h")
+        for i in range(n_samples):
+            t = i / sample_rate
+            f = start_f + (end_f - start_f) * (i / max(1, n_samples - 1))
+
+            # Quick attack + smooth release to avoid clicks
+            a = 1.0
+            attack = int(0.005 * sample_rate)
+            if i < attack:
+                a = i / max(1, attack)
+            release = int(0.020 * sample_rate)
+            if n_samples - i < release:
+                a *= (n_samples - i) / max(1, release)
+
+            s = int(amp * a * math.sin(2 * math.pi * f * t))
+            buf.append(s)
+
+        try:
+            return pygame.mixer.Sound(buffer=buf.tobytes())
+        except pygame.error:
+            return None
+
+    def _play(self, snd):
+        if self.sound_enabled and snd is not None:
+            try:
+                snd.play()
+            except pygame.error:
+                pass
 
     def reset(self):
         self.rng = random.Random()
@@ -158,7 +214,7 @@ class Game:
         self.powerups: list[PowerUp] = []
         self.particles: list[Particle] = []
         self.score = 0.0
-        self.best = 0.0
+        self.best = self.load_highscore()
         self.level = 1
         self.alive = True
         self.time = 0.0
@@ -287,6 +343,7 @@ class Game:
     def activate_slow_mo(self):
         self.slow_mo_timer = self.max_slow_mo_time
         self.time_scale = 0.5 
+        self._play(self.snd_powerup)
         self.create_particles(self.player.x + 14, self.player.y + 14, YELLOW, count=25, speed=180)
         self.shake_intensity = 6.0 
 
@@ -340,8 +397,13 @@ class Game:
     def draw_hud(self):
         score_txt = self.font.render(f"SCORE {int(self.score):>6}", True, WHITE)
         lvl_txt = self.font.render(f"LVL {self.level:>2}", True, WHITE)
+        best_txt = self.font.render(f"BEST  {int(self.best):>6}", True, YELLOW)
         screen.blit(score_txt, (12, 10))
         screen.blit(lvl_txt, (12, 32))
+        screen.blit(best_txt, (12, 54))
+
+        snd_txt = self.font.render(f"SOUND {'ON' if self.sound_enabled else 'OFF'} (M)", True, CYAN if self.sound_enabled else (140, 140, 160))
+        screen.blit(snd_txt, (12, 76))
         
         dash_bar_w, dash_bar_h = 140, 10
         dash_x, dash_y = WIDTH - dash_bar_w - 12, 14
@@ -388,8 +450,10 @@ class Game:
         if keys[pygame.K_RIGHT] or keys[pygame.K_d]: move_dir += 1.0
         
         if keys[pygame.K_SPACE] and move_dir != 0:
+            was_dashing = self.player.is_dashing
             self.player.start_dash(move_dir)
-            if self.player.is_dashing:
+            if self.player.is_dashing and not was_dashing:
+                self._play(self.snd_dash)
                 self.shake_intensity = 4.0
 
         if self.player.is_dashing:
@@ -406,14 +470,29 @@ class Game:
         
         if died:
             self.alive = False
+            self._play(self.snd_death)
             self._just_died_flash = 0.18
             self.shake_intensity = 18.0 
             self.create_particles(self.player.x + 14, self.player.y + 14, WHITE, count=40, speed=250)
-            self.best = max(self.best, self.score)
+            
+            if self.score > self.best:
+                self.best = self.score
+                self.save_highscore() 
             return
 
         self.score += effective_dt * (40.0 + 12.0 * clamp(self.difficulty(), 1.0, 6.0))
         self.level = self.compute_level()
+    
+    def load_highscore(self):
+        try:
+            with open("highscore.txt", "r") as f:
+                return float(f.read())
+        except:
+            return 0.0
+
+    def save_highscore(self):
+        with open("highscore.txt", "w") as f:
+            f.write(str(self.best))
 
 def main():
     game = Game()

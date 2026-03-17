@@ -6,21 +6,20 @@ from dataclasses import dataclass
 
 pygame.init()
 
-# Window
 WIDTH, HEIGHT = 600, 800
 FPS = 60
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-display_surface = pygame.Surface((WIDTH, HEIGHT)) 
+display_surface = pygame.Surface((WIDTH, HEIGHT))
 pygame.display.set_caption("NEON DODGE: Hard Mode")
 clock = pygame.time.Clock()
 
-# Colors
 WHITE = (245, 245, 245)
 BLACK = (10, 10, 14)
 RED = (240, 60, 90)
 CYAN = (70, 240, 240)
 YELLOW = (255, 220, 90)
 PURPLE = (170, 120, 255)
+SLOW_MO_BG = (15, 20, 45) 
 
 def clamp(v, lo, hi):
     return lo if v < lo else hi if v > hi else v
@@ -33,7 +32,7 @@ class Player:
     base_speed: float = 320.0
     dash_speed: float = 980.0
     dash_time: float = 0.085
-    dash_cooldown: float = 0.55
+    dash_cooldown: float = 0.95
     invuln_time: float = 0.10
 
     _dash_left: float = 0.0
@@ -54,17 +53,17 @@ class Player:
         self._cooldown_left = self.dash_cooldown
         self._invuln_left = self.invuln_time
 
-    def update(self, dt: float, move_dir: float):
+    def update(self, dt: float, move_dir: float, effective_dt: float):
         if self._cooldown_left > 0.0:
             self._cooldown_left = max(0.0, self._cooldown_left - dt)
         if self._invuln_left > 0.0:
             self._invuln_left = max(0.0, self._invuln_left - dt)
 
         if self._dash_left > 0.0:
-            self._dash_left = max(0.0, self._dash_left - dt)
-            self.x += self._dash_dir * self.dash_speed * dt
+            self._dash_left = max(0.0, self._dash_left - effective_dt)
+            self.x += self._dash_dir * self.dash_speed * effective_dt
         else:
-            self.x += move_dir * self.base_speed * dt
+            self.x += move_dir * self.base_speed * effective_dt
         self.x = clamp(self.x, 0, WIDTH - self.size)
 
     @property
@@ -100,6 +99,30 @@ class Hazard:
         return pygame.Rect(int(self.x), int(self.y), self.w, self.h)
 
 @dataclass
+class PowerUp:
+    x: float
+    y: float
+    size: int = 18
+    vy: float = 120.0
+    color: tuple[int, int, int] = YELLOW
+
+    def rect(self):
+        return pygame.Rect(int(self.x), int(self.y), self.size, self.size)
+
+    def update(self, effective_dt: float):
+        self.y += self.vy * effective_dt
+
+    def draw(self, surface):
+        points = [
+            (self.x + self.size/2, self.y),
+            (self.x + self.size, self.y + self.size/2),
+            (self.x + self.size/2, self.y + self.size),
+            (self.x, self.y + self.size/2)
+        ]
+        pygame.draw.polygon(surface, self.color, points)
+        pygame.draw.polygon(surface, WHITE, points, width=2)
+
+@dataclass
 class Particle:
     x: float
     y: float
@@ -132,6 +155,7 @@ class Game:
         self.rng = random.Random()
         self.player = Player(x=WIDTH/2-14, y=HEIGHT-78)
         self.hazards: list[Hazard] = []
+        self.powerups: list[PowerUp] = []
         self.particles: list[Particle] = []
         self.score = 0.0
         self.best = 0.0
@@ -139,9 +163,13 @@ class Game:
         self.alive = True
         self.time = 0.0
         self.spawn_timer = 0.0
+        self.powerup_timer = 0.0
         self.snipe_charge = 0.0
         self._just_died_flash = 0.0
         self.shake_intensity = 0.0
+        self.time_scale = 1.0 
+        self.slow_mo_timer = 0.0 
+        self.max_slow_mo_time = 4.0 
 
     def difficulty(self):
         return 1.0 + (self.score / 800.0)
@@ -149,7 +177,9 @@ class Game:
     def compute_level(self):
         return 1 + int(self.score // 450)
 
-    def create_particles(self, x, y, color, count=10, speed=150.0):
+    def create_particles(self, x, y, color, count=10, speed=150.0, effective_dt=None):
+        if effective_dt is None:
+            effective_dt = 1.0 
         for _ in range(count):
             self.particles.append(Particle(
                 x=x, y=y,
@@ -185,10 +215,16 @@ class Game:
         vy = 520 + 120*diff + self.rng.uniform(-40,60)
         self.hazards.append(Hazard("snipe", x, y, w, h, 0.0, vy, CYAN))
 
-    def update_spawns(self, dt):
+    def spawn_powerup(self):
+        x = self.rng.uniform(20, WIDTH-20)
+        y = -20
+        self.powerups.append(PowerUp(x, y))
+
+    def update_spawns(self, effective_dt):
         diff = self.difficulty()
-        self.spawn_timer -= dt
+        self.spawn_timer -= effective_dt
         base_interval = 0.32 / clamp(diff**0.55, 1.0, 3.0)
+        
         if self.spawn_timer <= 0.0:
             self.spawn_timer = clamp(base_interval + self.rng.uniform(-0.07,0.07), 0.10, 0.40)
             roll = self.rng.random()
@@ -198,35 +234,73 @@ class Game:
                 self.spawn_fall(diff)
                 if self.rng.random() < 0.35: self.spawn_zig(diff)
         
-        self.snipe_charge += dt
+        self.snipe_charge += effective_dt
         snipe_interval = clamp(1.35 / clamp(diff**0.65,1.0,4.0),0.45,1.35)
         if self.snipe_charge >= snipe_interval:
             self.snipe_charge = 0.0
             self.spawn_snipe(self.player.x, diff)
 
-    def update_hazards(self, dt):
+        can_spawn_diamond = len(self.powerups) == 0 and self.slow_mo_timer <= 0
+        
+        self.powerup_timer -= effective_dt
+        if self.powerup_timer <= 0.0:
+            if can_spawn_diamond:
+                self.spawn_powerup()
+                self.powerup_timer = self.rng.uniform(10.0, 20.0)
+            else:
+                self.powerup_timer = 1.0
+
+    def update_hazards(self, effective_dt):
         diff = self.difficulty()
         for hz in self.hazards:
-            hz.x += hz.vx*dt
-            hz.y += hz.vy*dt
+            hz.x += hz.vx*effective_dt
+            hz.y += hz.vy*effective_dt
             if hz.kind=="zig":
                 if hz.x<0: hz.x=0; hz.vx=abs(hz.vx)
                 if hz.x>WIDTH-hz.w: hz.x=WIDTH-hz.w; hz.vx=-abs(hz.vx)
-                hz.vx *= 1.0 + 0.22*dt*clamp(diff,1.0,4.0)
+                hz.vx *= 1.0 + 0.22*effective_dt*clamp(diff,1.0,4.0)
         self.hazards = [h for h in self.hazards if h.y<HEIGHT+140]
 
+    def update_powerups(self, effective_dt):
+        for pw in self.powerups:
+            pw.update(effective_dt)
+            self.create_particles(pw.x + pw.size/2, pw.y + pw.size/2, YELLOW, count=1, speed=20)
+        self.powerups = [pw for pw in self.powerups if pw.y < HEIGHT + 20]
+
     def check_collisions(self):
-        if self.player.invulnerable: return False
+        if self.player.invulnerable: return False, False
         p = self.player.rect()
+        
         for hz in self.hazards:
-            if p.colliderect(hz.rect()): return True
-        return False
+            if p.colliderect(hz.rect()): return True, False
+            
+        got_powerup = False
+        for pw in self.powerups:
+            if p.colliderect(pw.rect()):
+                self.activate_slow_mo()
+                self.powerups.remove(pw)
+                got_powerup = True
+                break
+                
+        return False, got_powerup
+
+    def activate_slow_mo(self):
+        self.slow_mo_timer = self.max_slow_mo_time
+        self.time_scale = 0.5 
+        self.create_particles(self.player.x + 14, self.player.y + 14, YELLOW, count=25, speed=180)
+        self.shake_intensity = 6.0 
 
     def draw(self):
-        display_surface.fill(BLACK)
+        if self.time_scale < 1.0:
+            display_surface.fill(SLOW_MO_BG)
+        else:
+            display_surface.fill(BLACK)
         
         for p in self.particles:
             p.draw(display_surface)
+
+        for pw in self.powerups:
+            pw.draw(display_surface)
 
         for hz in self.hazards:
             pygame.draw.rect(display_surface, hz.color, hz.rect(), border_radius=6)
@@ -256,32 +330,57 @@ class Game:
 
         if not self.alive:
             title = self.big_font.render("GAME OVER", True, WHITE)
-            sub = self.font.render("Press R to restart | Esc to quit", True, WHITE)
-            screen.blit(title,(WIDTH/2 - title.get_width()/2, HEIGHT/2-90))
-            screen.blit(sub,(WIDTH/2 - sub.get_width()/2, HEIGHT/2-25))
+            sub = self.font.render("Arrows/A D: Move | Space: Dash", True, CYAN)
+            restart_txt = self.font.render("Press R to restart | Esc to quit", True, WHITE)
+            
+            screen.blit(title, (WIDTH/2 - title.get_width()/2, HEIGHT/2 - 90))
+            screen.blit(sub, (WIDTH/2 - sub.get_width()/2, HEIGHT/2 - 25))
+            screen.blit(restart_txt, (WIDTH/2 - restart_txt.get_width()/2, HEIGHT/2 + 10))
 
     def draw_hud(self):
         score_txt = self.font.render(f"SCORE {int(self.score):>6}", True, WHITE)
         lvl_txt = self.font.render(f"LVL {self.level:>2}", True, WHITE)
-        screen.blit(score_txt,(12,10))
-        screen.blit(lvl_txt,(12,32))
-        bar_w, bar_h = 140, 10
-        x, y = WIDTH-bar_w-12, 14
-        pygame.draw.rect(screen,(40,40,55),(x,y,bar_w,bar_h),border_radius=6)
-        fill = int(bar_w*(1.0 - self.player.dash_cooldown_ratio))
-        pygame.draw.rect(screen,YELLOW if self.player.dash_ready else (160,140,70),(x,y,fill,bar_h),border_radius=6)
+        screen.blit(score_txt, (12, 10))
+        screen.blit(lvl_txt, (12, 32))
+        
+        dash_bar_w, dash_bar_h = 140, 10
+        dash_x, dash_y = WIDTH - dash_bar_w - 12, 14
+        pygame.draw.rect(screen, (40, 40, 55), (dash_x, dash_y, dash_bar_w, dash_bar_h), border_radius=6)
+        dash_fill = int(dash_bar_w * (1.0 - self.player.dash_cooldown_ratio))
+        pygame.draw.rect(screen, YELLOW if self.player.dash_ready else (160, 140, 70), (dash_x, dash_y, dash_fill, dash_bar_h), border_radius=6)
+
+        if self.slow_mo_timer > 0:
+            time_left = round(self.slow_mo_timer, 1)
+            slow_txt = self.big_font.render(str(time_left), True, YELLOW)
+            slow_txt.set_alpha(100) 
+            
+            text_rect = slow_txt.get_rect(center=(WIDTH // 2, HEIGHT // 2))
+            screen.blit(slow_txt, text_rect)
 
     def update(self, dt):
         if self.shake_intensity > 0:
             self.shake_intensity = max(0.0, self.shake_intensity - dt * 30.0)
+            
+        if not self.alive:
+            self._just_died_flash = max(0.0, self._just_died_flash - dt)
+            for p in self.particles:
+                p.update(dt)
+            self.particles = [p for p in self.particles if p.life > 0]
+            return
+
+        if self.slow_mo_timer > 0:
+            self.slow_mo_timer -= dt
+            self.time_scale = 0.5
+        else:
+            self.time_scale = 1.0
+
+        effective_dt = dt * self.time_scale
 
         for p in self.particles:
             p.update(dt)
         self.particles = [p for p in self.particles if p.life > 0]
 
-        if not self.alive:
-            self._just_died_flash = max(0.0, self._just_died_flash - dt)
-            return
+        self.update_powerups(effective_dt)
 
         keys = pygame.key.get_pressed()
         move_dir = 0.0
@@ -298,11 +397,14 @@ class Game:
                                   self.player.y + self.player.size/2, 
                                   CYAN, count=2, speed=50)
 
-        self.player.update(dt, move_dir)
-        self.update_spawns(dt)
-        self.update_hazards(dt)
+        self.player.update(dt, move_dir, effective_dt)
+        
+        self.update_spawns(effective_dt)
+        self.update_hazards(effective_dt)
 
-        if self.check_collisions():
+        died, got_pw = self.check_collisions()
+        
+        if died:
             self.alive = False
             self._just_died_flash = 0.18
             self.shake_intensity = 18.0 
@@ -310,7 +412,7 @@ class Game:
             self.best = max(self.best, self.score)
             return
 
-        self.score += dt*(40.0 + 12.0*clamp(self.difficulty(),1.0,6.0))
+        self.score += effective_dt * (40.0 + 12.0 * clamp(self.difficulty(), 1.0, 6.0))
         self.level = self.compute_level()
 
 def main():
